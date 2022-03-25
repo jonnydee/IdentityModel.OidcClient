@@ -34,7 +34,7 @@ namespace ConsoleClientWithBrowser
             // create a redirect URI using an available port on the loopback address.
             // requires the OP to allow random ports on 127.0.0.1 - otherwise set a static port
             var browser = new SystemBrowser();
-            string redirectUri = string.Format($"http://127.0.0.1:{browser.Port}");
+            var redirectUri = $"http://127.0.0.1:{browser.Port}";
 
             var options = new OidcClientOptions
             {
@@ -46,7 +46,7 @@ namespace ConsoleClientWithBrowser
 
                 Browser = browser,
                 IdentityTokenValidator = new JwtHandlerIdentityTokenValidator(),
-                RefreshTokenInnerHttpHandler = new SocketsHttpHandler()
+                RefreshTokenInnerHttpHandler = new SocketsHttpHandler(),
             };
 
             var serilog = new LoggerConfiguration()
@@ -73,23 +73,24 @@ namespace ConsoleClientWithBrowser
         {
             if (result.IsError)
             {
-                Console.WriteLine("\n\nError:\n{0}", result.Error);
+                Console.WriteLine($"Error:\n  {result.Error}");
                 return;
             }
 
-            Console.WriteLine("\n\nClaims:");
+            Console.WriteLine("Claims:");
             foreach (var claim in result.User.Claims)
             {
-                Console.WriteLine("{0}: {1}", claim.Type, claim.Value);
+                Console.WriteLine($"  {claim.Type}: {claim.Value}");
             }
+            Console.WriteLine();
 
+            Console.WriteLine($"Token response:");
             var values = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(result.TokenResponse.Raw);
-
-            Console.WriteLine($"token response...");
             foreach (var item in values)
             {
-                Console.WriteLine($"{item.Key}: {item.Value}");
+                Console.WriteLine($"  {item.Key}: {item.Value}");
             }
+            Console.WriteLine();
         }
 
         private static async Task NextSteps(LoginResult result)
@@ -97,34 +98,49 @@ namespace ConsoleClientWithBrowser
             var currentAccessToken = result.AccessToken;
             var currentRefreshToken = result.RefreshToken;
 
-            var menu = "  x...exit  c...call api   ";
-            if (currentRefreshToken != null) menu += "r...refresh token   ";
-
+            var menu = "COMMANDS:\n"
+                + "  x : [exit]\n"
+                + "  c : [call api]\n"
+                + (!string.IsNullOrEmpty(currentRefreshToken) ? "  r : [refresh token]\n" : "\n")
+                + "\n";
+            
             while (true)
             {
-                Console.WriteLine("\n\n");
-
+                Console.WriteLine();
+                Console.WriteLine("--------------------------------------------");
                 Console.Write(menu);
+                Console.Write("?> ");
                 var key = Console.ReadKey();
+                Console.WriteLine();
 
-                if (key.Key == ConsoleKey.X) return;
-                if (key.Key == ConsoleKey.C) await CallApi();
-                if (key.Key == ConsoleKey.R)
+                switch (key.Key)
                 {
-                    var refreshResult = await _oidcClient.RefreshTokenAsync(currentRefreshToken);
-                    if (refreshResult.IsError)
+                    case ConsoleKey.C:
                     {
-                        Console.WriteLine($"Error: {refreshResult.Error}");
+                        await CallApi();
+                        break;
                     }
-                    else
-                    {
-                        currentRefreshToken = refreshResult.RefreshToken;
-                        currentAccessToken = refreshResult.AccessToken;
 
-                        Console.WriteLine("\n\n");
-                        Console.WriteLine($"access token:   {currentAccessToken}");
-                        Console.WriteLine($"refresh token:  {currentRefreshToken ?? "none"}");
+                    case ConsoleKey.R:
+                    {
+                        var refreshResult = await _oidcClient.RefreshTokenAsync(currentRefreshToken);
+                        if (refreshResult.IsError)
+                        {
+                            Console.WriteLine($"Error:\n  {refreshResult.Error}\n");
+                        }
+                        else
+                        {
+                            currentRefreshToken = refreshResult.RefreshToken;
+                            currentAccessToken = refreshResult.AccessToken;
+
+                            Console.WriteLine($"Access Token:\n  {currentAccessToken}");
+                            Console.WriteLine();
+                            Console.WriteLine($"Refresh Token:\n  {currentRefreshToken ?? "<none>"}");
+                        }
+                        break;
                     }
+
+                    case ConsoleKey.X: return;
                 }
             }
         }
@@ -136,12 +152,12 @@ namespace ConsoleClientWithBrowser
             if (response.IsSuccessStatusCode)
             {
                 var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-                Console.WriteLine("\n\n");
+                Console.WriteLine("\n");
                 Console.WriteLine(json.RootElement);
             }
             else
             {
-                Console.WriteLine($"Error: {response.ReasonPhrase}");
+                Console.WriteLine($"Error:\n  {response.ReasonPhrase}");
             }
         }
     }
