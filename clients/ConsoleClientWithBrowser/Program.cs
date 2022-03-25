@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
+using IdentityModel.OidcClient.Browser;
+using IdentityModel.OidcClient.Results;
 using Serilog.Sinks.SystemConsole.Themes;
 
 namespace ConsoleClientWithBrowser
@@ -22,15 +24,7 @@ namespace ConsoleClientWithBrowser
             Console.WriteLine("+-----------------------+");
             Console.WriteLine("|  Sign in with OIDC    |");
             Console.WriteLine("+-----------------------+");
-            Console.WriteLine("");
-            Console.WriteLine("Press any key to sign in...");
-            Console.ReadKey();
 
-            await SignIn();
-        }
-
-        private static async Task SignIn()
-        {
             // create a redirect URI using an available port on the loopback address.
             // requires the OP to allow random ports on 127.0.0.1 - otherwise set a static port
             var browser = new SystemBrowser();
@@ -58,54 +52,24 @@ namespace ConsoleClientWithBrowser
             options.LoggerFactory.AddSerilog(serilog);
 
             _oidcClient = new OidcClient(options);
-            var result = await _oidcClient.LoginAsync(new LoginRequest());
 
-            _apiClient = new HttpClient(result.RefreshTokenHandler)
-            {
-                BaseAddress = new Uri(_api)
-            };
-
-            ShowResult(result);
-            await NextSteps(result);
+            await Repl(); // Read-eval-print loop.
         }
 
-        private static void ShowResult(LoginResult result)
+        private static async Task Repl()
         {
-            if (result.IsError)
-            {
-                Console.WriteLine($"Error:\n  {result.Error}");
-                return;
-            }
-
-            Console.WriteLine("Claims:");
-            foreach (var claim in result.User.Claims)
-            {
-                Console.WriteLine($"  {claim.Type}: {claim.Value}");
-            }
-            Console.WriteLine();
-
-            Console.WriteLine($"Token response:");
-            var values = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(result.TokenResponse.Raw);
-            foreach (var item in values)
-            {
-                Console.WriteLine($"  {item.Key}: {item.Value}");
-            }
-            Console.WriteLine();
-        }
-
-        private static async Task NextSteps(LoginResult result)
-        {
-            var currentAccessToken = result.AccessToken;
-            var currentRefreshToken = result.RefreshToken;
-
-            var menu = "COMMANDS:\n"
-                + "  x : [exit]\n"
-                + "  c : [call api]\n"
-                + (!string.IsNullOrEmpty(currentRefreshToken) ? "  r : [refresh token]\n" : "\n")
-                + "\n";
-            
+            string currentAccessToken = null;
+            string currentRefreshToken = null;
             while (true)
             {
+                var menu = "COMMANDS:\n"
+                           + (currentAccessToken != null ? "  c : [call api]\n" : "\n")
+                           + (currentAccessToken == null ? "  l : [login]\n" : "\n")
+                           + (!string.IsNullOrEmpty(currentRefreshToken) ? "  r : [refresh token]\n" : "\n")
+                           + (currentRefreshToken != null ? "  s : [steal refresh token]\n" : "\n")
+                           + "  x : [exit]\n"
+                           + "\n";
+
                 Console.WriteLine();
                 Console.WriteLine("--------------------------------------------");
                 Console.Write(menu);
@@ -117,48 +81,139 @@ namespace ConsoleClientWithBrowser
                 {
                     case ConsoleKey.C:
                     {
-                        await CallApi();
+                        Console.WriteLine("*** CALL API ***\n");
+                        await CallApi(currentAccessToken);
+                        break;
+                    }
+
+                    case ConsoleKey.L:
+                    {
+                        Console.WriteLine("*** LOGIN ***\n");
+                        if (await Login() is LoginResult result)
+                        {
+                            currentAccessToken = result.AccessToken;
+                            currentRefreshToken = result.RefreshToken;
+
+                            _apiClient = new HttpClient(result.RefreshTokenHandler)
+                            {
+                                BaseAddress = new Uri(_api),
+                            };
+                        }
                         break;
                     }
 
                     case ConsoleKey.R:
                     {
-                        var refreshResult = await _oidcClient.RefreshTokenAsync(currentRefreshToken);
-                        if (refreshResult.IsError)
+                        Console.WriteLine("*** REFRESH TOKEN ***\n");
+                        if (await RefreshToken(currentRefreshToken) is RefreshTokenResult refreshResult)
                         {
-                            Console.WriteLine($"Error:\n  {refreshResult.Error}\n");
+                            currentAccessToken = refreshResult.AccessToken;
+                            currentRefreshToken = refreshResult.RefreshToken;
                         }
                         else
                         {
-                            currentRefreshToken = refreshResult.RefreshToken;
-                            currentAccessToken = refreshResult.AccessToken;
+                            _apiClient!.Dispose();
+                            _apiClient = null;
 
-                            Console.WriteLine($"Access Token:\n  {currentAccessToken}");
-                            Console.WriteLine();
-                            Console.WriteLine($"Refresh Token:\n  {currentRefreshToken ?? "<none>"}");
+                            currentAccessToken = null;
+                            currentRefreshToken = null;
                         }
                         break;
                     }
 
-                    case ConsoleKey.X: return;
+                    case ConsoleKey.S:
+                    {
+                        Console.WriteLine("*** STEAL & REFRESH TOKEN ***\n");
+                        await StealAndRefreshToken(currentRefreshToken);
+                        break;
+                    }
+
+                    case ConsoleKey.X:
+                    {
+                        Console.WriteLine("*** EXIT ***\n");
+                        return;
+                    }
                 }
             }
         }
 
-        private static async Task CallApi()
+        private static async Task StealAndRefreshToken(string currentRefreshToken)
         {
-            var response = await _apiClient.GetAsync("");
+            Console.WriteLine($"ATTACKER Stealing Refresh Token:\n  {currentRefreshToken}");
 
-            if (response.IsSuccessStatusCode)
+            var refreshResult = await _oidcClient.RefreshTokenAsync(currentRefreshToken);
+            if (refreshResult.IsError)
             {
-                var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-                Console.WriteLine("\n");
-                Console.WriteLine(json.RootElement);
+                Console.WriteLine($"Error:\n  {refreshResult.Error}\n");
+                return;
             }
-            else
+
+            var currentRefreshTokenOfAttacker = refreshResult.RefreshToken;
+            var currentAccessTokenOfAttacker = refreshResult.AccessToken;
+
+            Console.WriteLine($"ATTACKER Access Token:\n  {currentAccessTokenOfAttacker}");
+            Console.WriteLine();
+            Console.WriteLine($"ATTACKER Refresh Token:\n  {currentRefreshTokenOfAttacker}");
+        }
+
+        private static async Task CallApi(string currentAccessToken)
+        {
+            Console.WriteLine($"Using Access Token:\n  {currentAccessToken}\n");
+
+            var response = await _apiClient.GetAsync((string)null);
+
+            if (!response.IsSuccessStatusCode)
             {
                 Console.WriteLine($"Error:\n  {response.ReasonPhrase}");
+                return;
             }
+
+            var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Console.WriteLine("\n");
+            Console.WriteLine(json.RootElement);
+        }
+
+        private static async Task<LoginResult> Login()
+        {
+            var result = await _oidcClient.LoginAsync(new LoginRequest(){ BrowserDisplayMode = DisplayMode.Hidden });
+            if (result.IsError)
+            {
+                Console.WriteLine($"Error:\n  {result.Error}");
+                return null;
+            }
+
+            Console.WriteLine("Claims:");
+            foreach (var claim in result.User.Claims)
+            {
+                Console.WriteLine($"  {claim.Type}: {claim.Value}");
+            }
+            Console.WriteLine();
+
+            Console.WriteLine($"Token response:");
+            var values = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(result.TokenResponse.Raw)!;
+            foreach (var item in values)
+            {
+                Console.WriteLine($"  {item.Key}: {item.Value}");
+            }
+            Console.WriteLine();
+
+            return result;
+        }
+
+        private static async Task<RefreshTokenResult> RefreshToken(string currentRefreshToken)
+        {
+            var refreshResult = await _oidcClient.RefreshTokenAsync(currentRefreshToken);
+            if (refreshResult.IsError)
+            {
+                Console.WriteLine($"Error:\n  {refreshResult.Error}\n");
+                return null;
+            }
+
+            Console.WriteLine($"Access Token:\n  {refreshResult.AccessToken}");
+            Console.WriteLine();
+            Console.WriteLine($"Refresh Token:\n  {refreshResult.RefreshToken ?? "<none>"}");
+            
+            return refreshResult;
         }
     }
 }
